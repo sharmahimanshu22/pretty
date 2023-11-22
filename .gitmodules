@@ -1,3 +1,6 @@
 [submodule "deps/cap"]
 	path = deps/cap
 	url = git@github.com:sharmahimanshu22/cap.git
+[submodule "deps/tinyobjloader"]
+	path = deps/tinyobjloader
+	url = https://github.com/tinyobjloader/tinyobjloader.git

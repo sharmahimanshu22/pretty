@@ -11,7 +11,7 @@ if(NOT DEFINED CMAKE_CUDA_STANDARD)
 endif()
 
 add_executable(${PROJECT_NAME})
-target_sources(${PROJECT_NAME} PRIVATE main.cpp src/CudaDeviceManagerInternal.cu)
+target_sources(${PROJECT_NAME} PRIVATE main.cpp src/CudaDeviceManagerInternal.cu src/mortoncoder.cu)
 
 set_target_properties(myapp PROPERTIES
                             CUDA_SEPARABLE_COMPILATION ON)
@@ -26,6 +26,8 @@ target_include_directories(${PROJECT_NAME}
 add_subdirectory(deps/cap)
 target_link_libraries(${PROJECT_NAME} PUBLIC cap)
 
+add_subdirectory(deps/tinyobjloader)
+target_link_libraries(${PROJECT_NAME} PUBLIC tinyobjloader)
 
 
 #find_package(cap CONFIG REQUIRED)
@@ -58,8 +60,6 @@ target_link_libraries(${PROJECT_NAME} PUBLIC cap)
 #target_include_directories(${PROJECT_NAME} PUBLIC ${OpenCV_INCLUDE_DIRS} )
 #target_link_libraries( ${PROJECT_NAME} PUBLIC ${OpenCV_LIBS} )
 
-#add_subdirectory(deps/tinyobjloader)
-#target_link_libraries(${PROJECT_NAME} PUBLIC tinyobjloader)
 
 #include(cmake/CPM.cmake)
 
