@@ -10,6 +10,10 @@ if(NOT DEFINED CMAKE_CUDA_STANDARD)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 endif()
 
+if(NOT DEFINED ${CMAKE_CUDA_ARCHITECTURES})
+    set(CMAKE_CUDA_ARCHITECTURES 61)
+endif()
+
 add_executable(${PROJECT_NAME})
 target_sources(${PROJECT_NAME} PRIVATE main.cpp src/CudaDeviceManagerInternal.cu src/mortoncoder.cu)
 
