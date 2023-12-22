@@ -12,6 +12,7 @@
 #include <cmath>
 #include "mortoncoder.h"
 #include <bitset>
+#include <cub/cub.cuh> 
 
 using namespace cub;
 //---------------------------------------------------------------------
@@ -149,12 +150,19 @@ void compute64BitMortonCode3dPoint(float* centroids, int count, int* bboxint, ui
     splitBy3(cz_int, s_z);
     mortonCodes[i] = s_x | s_y << 1 | s_z << 2 ;
     
-  }
-  
-  
+  }  
 }
 
+__global__
+void cuda_memsetindices(int* idces, int n) {
+  int tid = blockIdx.x*blockDim.x + threadIdx.x;
+  int nt = blockDim.x*gridDim.x;
 
+  for(int i = tid; i < n; i = i+nt) { 
+    idces[i] = i;
+  }
+
+}
 
 __global__
 void computeTriangleCentroids(float* d_vertices, int* d_indices, float* d_centroids, int nFaces, int* bbox) 
@@ -234,6 +242,44 @@ void copyTinyObjSceneToGPU(tinyobj::attrib_t& attrib, std::vector<tinyobj::shape
 }
 
 
+__host__
+void radixSortMortonCodes(uint64_t* mortonCodes, int* &sortedOrder, int numOfPrimitives) {
+
+  cudaError_t error = cudaSuccess;
+  int* idces;
+  error = cudaMalloc(&idces, numOfPrimitives*sizeof(int));
+  cuda_memsetindices<<<32,64>>>(idces, numOfPrimitives);
+
+  int* idcesAlternate;
+  error = cudaMalloc(&idcesAlternate, numOfPrimitives*sizeof(int));
+  cudaMemcpy(idcesAlternate, idces, numOfPrimitives*sizeof(int), cudaMemcpyDeviceToDevice);
+
+  uint64_t* mortonCodesAlternate;
+  error = cudaMalloc(&mortonCodesAlternate, numOfPrimitives*sizeof(uint64_t));
+  cudaMemcpy(mortonCodesAlternate, mortonCodes, numOfPrimitives*sizeof(uint64_t), cudaMemcpyDeviceToDevice);
+
+  cub::DoubleBuffer<uint64_t> d_keys = *(new cub::DoubleBuffer<uint64_t>(mortonCodes, mortonCodesAlternate));
+  cub::DoubleBuffer<int> d_values= *(new cub::DoubleBuffer<int>(idces, idcesAlternate));
+
+  void* d_temp_storage = NULL;
+  size_t temp_storage_bytes = 0;
+
+  cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys, d_values, numOfPrimitives);
+  
+  cudaMalloc(&d_temp_storage, temp_storage_bytes);
+
+  cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys, d_values, numOfPrimitives);
+
+  if(error) {
+    std::cout << cudaGetErrorString(error) << " memset failed\n";
+    return;
+  }
+
+  sortedOrder = d_values.Current();
+  mortonCodes = d_keys.Current();
+
+  return;
+}
 
 
 cudaError_t cuda_kernel(tinyobj::attrib_t attrib, std::vector<tinyobj::shape_t> shapes)
@@ -337,13 +383,31 @@ cudaError_t cuda_kernel(tinyobj::attrib_t attrib, std::vector<tinyobj::shape_t> 
     return error;
   }
   
-  
+  int* sortedIndices = NULL;
+  radixSortMortonCodes(mortonCodes, sortedIndices, nFaces);
+
+  error = cudaGetLastError();
+  if(error) {
+    std::cout << cudaGetErrorString(error) << " sorting failed\n";
+    return error;
+  }
+
   float* centroids = (float*)malloc(3*nFaces*sizeof(float));
   cudaMemcpy(centroids, d_centroids, 3*nFaces*sizeof(float), cudaMemcpyDeviceToHost);
   uint64_t* mortonhost = (uint64_t*)malloc(nFaces*sizeof(uint64_t));
   cudaMemcpy(mortonhost, mortonCodes, nFaces*sizeof(uint64_t), cudaMemcpyDeviceToHost);
 
+  int* sortedHost = (int*) malloc(nFaces*sizeof(int));
+  cudaMemcpy(sortedHost, sortedIndices, nFaces*sizeof(int), cudaMemcpyDeviceToHost);
+
+  for(int kk = 0; kk < 224448; kk++) {
+    std::cout << std::bitset<64>(mortonhost[kk]);
+    std:: cout << "," << sortedHost[kk] << "\n" ;  //<< std::bitset<64>(mortonhost[idx]) << "\n";
+  }
+
   cudaDeviceSynchronize();
+
+  /*
   for(int i = 0; i < 100; i++) {
     int idx1 = shapes[0].mesh.indices[i].vertex_index;
     int idx2 = shapes[0].mesh.indices[i+1].vertex_index;
@@ -365,6 +429,7 @@ cudaError_t cuda_kernel(tinyobj::attrib_t attrib, std::vector<tinyobj::shape_t> 
     std::cout << x1 << " " << x2 << " " << x3 << y1 << " " << y2 << " " << y3 << z1 << " " << z2 << " " << z3 << "\n";
     std::cout << centroids[3*i]  << " " << centroids[3*i + 1]  << " " << centroids[3*i+2] << " " << std::bitset<64>(mortonhost[i]) << "\n";
   }
+  */
   
 
 
