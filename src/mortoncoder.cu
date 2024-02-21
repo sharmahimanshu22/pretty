@@ -20,67 +20,8 @@ using namespace cub;
 //---------------------------------------------------------------------
 bool                    g_verbose = false;  // Whether to display input/output to console
 CachingDeviceAllocator  g_allocator(true);  // Caching allocator for device memory
-//---------------------------------------------------------------------
-// Test generation
-//---------------------------------------------------------------------
 
 /*
-struct Pair
-{
-    float   key;
-    int     value;
-    bool operator<(const Pair &b) const
-    {
-        if (key < b.key)
-            return true;
-        if (key > b.key)
-            return false;
-        // Return true if key is negative zero and b.key is positive zero
-        unsigned int key_bits   = SafeBitCast<unsigned int>(key);
-        unsigned int b_key_bits = SafeBitCast<unsigned int>(b.key);
-        unsigned int HIGH_BIT   = 1u << 31;
-        return ((key_bits & HIGH_BIT) != 0) && ((b_key_bits & HIGH_BIT) == 0);
-    }
-};
-
-
-
-void Initialize(
-    float           *h_keys,
-    int             *h_values,
-    float           *h_reference_keys,
-    int             *h_reference_values,
-    int             num_items)
-{
-    Pair *h_pairs = new Pair[num_items];
-    for (int i = 0; i < num_items; ++i)
-    {
-        RandomBits(h_keys[i]);
-        RandomBits(h_values[i]);
-        h_pairs[i].key    = h_keys[i];
-        h_pairs[i].value  = h_values[i];
-    }
-    if (g_verbose)
-    {
-        printf("Input keys:\n");
-        DisplayResults(h_keys, num_items);
-        printf("\n\n");
-        printf("Input values:\n");
-        DisplayResults(h_values, num_items);
-        printf("\n\n");
-    }
-    std::stable_sort(h_pairs, h_pairs + num_items);
-    for (int i = 0; i < num_items; ++i)
-    {
-        h_reference_keys[i]     = h_pairs[i].key;
-        h_reference_values[i]   = h_pairs[i].value;
-    }
-    delete[] h_pairs;
-}
-
-*/
-/*
-
 https://stackoverflow.com/a/17401122
 __device__ 
 static float atomicMax(float* address, float val)
@@ -122,6 +63,107 @@ void splitBy3(int a, uint64_t& s) {
     s = (s | s << 2) & 0x1249249249249249;
 }
 
+__device__ 
+void findSplit(uint64_t* codes, int nodeId, int direction, int l, int& childLeft, int& childRight) {
+
+  // l can be two or greater
+  int t = (l+1)/2;
+  int s = 0;
+  uint64_t code1 = codes[nodeId];
+  uint64_t code2 = codes[nodeId + (l-1)*direction];
+  int minCodeLength = __clzll(code1^code2);
+  while(true) {
+    uint64_t other = codes[nodeId + (s+t)*direction];
+    int commonCodeLength = __clzll(code^other);
+    if (commonCodeLength > minCodeLength) {
+      s += t;
+      if (t == 1) {
+	break;
+      }
+      t = (t+1)/2;
+    }
+  }
+}
+
+
+__device__
+void findRangeWithSamePrefix(const uint64_t* codes, const int count, int nodeId,  unsigned int* lengths) {
+  
+
+  // get direction and mincommonlength
+  
+  assert (nodeId <= count - 2);
+  assert (nodeId >= 1);
+  uint64_t code = codes[nodeId];
+  uint64_t codeleft = codes[nodeId-1];
+  uint64_t coderight = codes[nodeId+1];
+  int commonLengthLeft = __clzll(code^codeleft);
+  int commonLengthRight = __clzll(code^coderight);
+  if(nodeId == 8084) {
+    printf("%d \n", commonLengthLeft);
+    printf("%d \n\n\n", commonLengthRight);
+  }
+
+  int direction = commonLengthRight > commonLengthLeft ? 1 : -1; // The should not be equal. Equal means there is a code repetition.
+  int commonLengthMinBound = direction == 1 ? commonLengthLeft : commonLengthRight;
+  int commonLength = direction == 1 ? commonLengthRight : commonLengthLeft;
+
+
+  // find lmax
+  int lmax = 2;
+  while(true) {
+    int idx = nodeId + lmax*direction;
+    if (idx > count - 1 || idx < 0) {
+      break;
+    }
+    uint64_t code2 = codes[idx];
+    commonLength = __clzll(code^code2);
+    if (commonLength > commonLengthMinBound) {
+      lmax += lmax;
+    } else {
+      break;
+    }
+  }
+  // We have lmax. Real l value is between lmax/2 and lmax;
+
+  // find l
+  int l = 0;
+  int t = lmax/2;
+  while(t >= 1) {
+    int idx = nodeId + (l+t)*direction;
+    if (idx < 0 || idx > count-1) {
+      t = t/2;
+    } else {
+      uint64_t code2 = codes[idx];
+      commonLength = __clzll(code^code2);
+      if(commonLength > commonLengthMinBound) {
+	l = l + t;
+      }
+      t = t/2;
+    }
+  }
+  l = l+1; // This is just the adjustment for acual length. The previous while loop computes the length of range - 1.
+
+  lengths[nodeId] = l;
+  // Now we have the final value of l
+  
+}
+
+
+
+// https://developer.nvidia.com/blog/parallelforall/wp-content/uploads/2012/11/karras2012hpg_paper.pdf
+__global__
+void createBVH(uint64_t* sortedMortonCodes, int count, unsigned int* lengths) {
+
+  int tid = blockIdx.x*blockDim.x + threadIdx.x;
+  int nt = blockDim.x*gridDim.x;
+  
+  for (int i = tid; i < count-2; i = i + nt) {
+    findRangeWithSamePrefix(sortedMortonCodes, count, i+1, lengths);  // i == 0 will be dealt separately
+  }
+  lengths[0] = count;
+
+}
 
 
 
@@ -241,9 +283,11 @@ void copyTinyObjSceneToGPU(tinyobj::attrib_t& attrib, std::vector<tinyobj::shape
   return;
 }
 
-
+/*
+The method updates the parameters mortonCondes and sortedOrder
+ */
 __host__
-void radixSortMortonCodes(uint64_t* mortonCodes, int* &sortedOrder, int numOfPrimitives) {
+void radixSortMortonCodes(uint64_t* mortonCodes, int* &sortedOrder, const int numOfPrimitives) {
 
   cudaError_t error = cudaSuccess;
   int* idces;
@@ -368,7 +412,7 @@ cudaError_t cuda_kernel(tinyobj::attrib_t attrib, std::vector<tinyobj::shape_t> 
   error = cudaMalloc(&mortonCodes, nFaces*sizeof(uint64_t));
   if(error) return error;
 
-  error = cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, compute64BitMortonCode3dPoint, 0, nFaces); 
+  error = cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, compute64BitMortonCode3dPoint, 0, nFaces);
   if(error) return error;
   dim3 dimGrid2(32,1,1);
   dim3 dimBlock2(32,1,1);
@@ -400,118 +444,33 @@ cudaError_t cuda_kernel(tinyobj::attrib_t attrib, std::vector<tinyobj::shape_t> 
   int* sortedHost = (int*) malloc(nFaces*sizeof(int));
   cudaMemcpy(sortedHost, sortedIndices, nFaces*sizeof(int), cudaMemcpyDeviceToHost);
 
-  for(int kk = 0; kk < 224448; kk++) {
+
+  std::cout << std::bitset<64> (17) << " :check this\n"  ;
+  for(int kk = 0; kk < 20; kk++) {
     std::cout << std::bitset<64>(mortonhost[kk]);
-    std:: cout << "," << sortedHost[kk] << "\n" ;  //<< std::bitset<64>(mortonhost[idx]) << "\n";
+    std:: cout << "," << mortonhost[kk] << "\n" ;  //<< std::bitset<64>(mortonhost[idx]) << "\n";
   }
 
   cudaDeviceSynchronize();
 
-  /*
-  for(int i = 0; i < 100; i++) {
-    int idx1 = shapes[0].mesh.indices[i].vertex_index;
-    int idx2 = shapes[0].mesh.indices[i+1].vertex_index;
-    int idx3 = shapes[0].mesh.indices[i+2].vertex_index;
-    
-    float x1 = attrib.vertices[3*idx1 +0];
-    float y1 = attrib.vertices[3*idx1 +1];
-    float z1 = attrib.vertices[3*idx1 +2];
 
-    float x2 = attrib.vertices[3*idx2 +0];
-    float y2 = attrib.vertices[3*idx2 +1];
-    float z2 = attrib.vertices[3*idx2 +2];
+  unsigned int* lengths;
+  cudaMalloc(&lengths, (nFaces-1)*sizeof(unsigned int));
 
-    float x3 = attrib.vertices[3*idx3 +0];
-    float y3 = attrib.vertices[3*idx3 +1];
-    float z3 = attrib.vertices[3*idx3 +2];
+  createBVH<<<32,64>>>(mortonCodes, nFaces, lengths);
+  
+  int* lengthsHost = (int*) malloc((nFaces-1)*sizeof(unsigned int));
+  cudaMemcpy(lengthsHost, lengths, (nFaces-1)*sizeof(int), cudaMemcpyDeviceToHost);
 
-
-    std::cout << x1 << " " << x2 << " " << x3 << y1 << " " << y2 << " " << y3 << z1 << " " << z2 << " " << z3 << "\n";
-    std::cout << centroids[3*i]  << " " << centroids[3*i + 1]  << " " << centroids[3*i+2] << " " << std::bitset<64>(mortonhost[i]) << "\n";
+  std::cout << "\n\n\n";
+  for(int kk = 8080; kk < 8090; kk++) {
+    //if (lengthsHost[kk] > 1000) {
+    std::cout << kk << " " << lengthsHost[kk] << " " << mortonhost[kk] << " " << mortonhost[kk-1] << " " << mortonhost[kk+1] << "\n";      
+      //}
+    //std:: cout << "," << sortedHost[kk] << "\n" ;  //<< std::bitset<64>(mortonhost[idx]) << "\n";
   }
-  */
-  
 
 
 
-
-  /*
-  float time;
-  cudaEvent_t start, stop;
-  cudaEventCreate(&start);
-  cudaEventCreate(&stop);
-  cudaEventRecord(start, 0);
-
-  int blockSize;      // The launch configurator returned block size 
-  int minGridSize;    // The minimum grid size needed to achieve the maximum occupancy for a full device launch 
-  int gridSize;       // The actual grid size needed, based on input size 
-
-  cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, computeTriangleCentroids, 0, nFaces); 
-
-  std::cout << "minGridSize: " << minGridSize << " blockSize: " << blockSize << "\n";
-  */
-
-  //computeTriangleCentroids(d_v, d_indices, centroid, )
-  
-  
-
-
-
-  
-  /*
-    int num_items = 150;
-    // Initialize command line
-    printf("cub::DeviceRadixSort::SortPairs() %d items (%d-byte keys %d-byte values)\n",
-        num_items, int(sizeof(float)), int(sizeof(int)));
-    fflush(stdout);
-    // Allocate host arrays
-    float   *h_keys             = new float[num_items];
-    float   *h_reference_keys   = new float[num_items];
-    int     *h_values           = new int[num_items];
-    int     *h_reference_values = new int[num_items];
-    // Initialize problem and solution on host
-
-    
-    Initialize(h_keys, h_values, h_reference_keys, h_reference_values, num_items);
-
-
-    
-    // Allocate device arrays
-    DoubleBuffer<float> d_keys;
-    DoubleBuffer<int>   d_values;
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_keys.d_buffers[0], sizeof(float) * num_items));
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_keys.d_buffers[1], sizeof(float) * num_items));
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_values.d_buffers[0], sizeof(int) * num_items));
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_values.d_buffers[1], sizeof(int) * num_items));
-    // Allocate temporary storage
-    size_t  temp_storage_bytes  = 0;
-    void    *d_temp_storage     = NULL;
-    CubDebugExit(DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys, d_values, num_items));
-    CubDebugExit(g_allocator.DeviceAllocate(&d_temp_storage, temp_storage_bytes));
-    // Initialize device arrays
-    CubDebugExit(cudaMemcpy(d_keys.d_buffers[d_keys.selector], h_keys, sizeof(float) * num_items, cudaMemcpyHostToDevice));
-    CubDebugExit(cudaMemcpy(d_values.d_buffers[d_values.selector], h_values, sizeof(int) * num_items, cudaMemcpyHostToDevice));
-    // Run
-    CubDebugExit(DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes, d_keys, d_values, num_items));
-    // Check for correctness (and display results, if specified)
-    int compare = CompareDeviceResults(h_reference_keys, d_keys.Current(), num_items, true, g_verbose);
-    printf("\t Compare keys (selector %d): %s\n", d_keys.selector, compare ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-    compare = CompareDeviceResults(h_reference_values, d_values.Current(), num_items, true, g_verbose);
-    printf("\t Compare values (selector %d): %s\n", d_values.selector, compare ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-    // Cleanup
-    if (h_keys) delete[] h_keys;
-    if (h_reference_keys) delete[] h_reference_keys;
-    if (h_values) delete[] h_values;
-    if (h_reference_values) delete[] h_reference_values;
-    if (d_keys.d_buffers[0]) CubDebugExit(g_allocator.DeviceFree(d_keys.d_buffers[0]));
-    if (d_keys.d_buffers[1]) CubDebugExit(g_allocator.DeviceFree(d_keys.d_buffers[1]));
-    if (d_values.d_buffers[0]) CubDebugExit(g_allocator.DeviceFree(d_values.d_buffers[0]));
-    if (d_values.d_buffers[1]) CubDebugExit(g_allocator.DeviceFree(d_values.d_buffers[1]));
-    if (d_temp_storage) CubDebugExit(g_allocator.DeviceFree(d_temp_storage));
-    printf("\n\n");
-
-    */
-    return error;
+  return error;
 }
